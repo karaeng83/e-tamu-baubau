@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
+import { ACCOUNTS_KEY, readUserAccounts, SESSION_KEY, USER_ROLES } from "./userAccounts.js";
+import SuperadminLogin from "./SuperadminLogin.jsx";
 import PublicVisitForm from "./PublicVisitForm.jsx";
 import VisitorToolsModal from "./VisitorToolsModal.jsx";
 import { readEventPlans, readPublicVisits } from "./visitorStorage.js";
@@ -74,8 +76,6 @@ const navGroups = [
   { title: "KESELAMATAN", items: [{ id: "evacuation", label: "Daftar evakuasi", icon: "shield" }, { id: "reports", label: "Laporan & analitik", icon: "chart" }, { id: "feedback", label: "Feedback & aduan", icon: "check" }] },
   { title: "PENGELOLAAN", items: [{ id: "masters", label: "Master data", icon: "building" }, { id: "users", label: "Admin & akses", icon: "key" }, { id: "integrations", label: "Integrasi sistem", icon: "plug" }] },
 ];
-const roleOptions = ["Admin Sistem", "Petugas Front Office", "Pegawai / Host", "Pimpinan"];
-
 function Icon({ name, size = 18 }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true };
   const paths = {
@@ -195,15 +195,14 @@ function YearTrend({ visits, year }) {
   return <section className="gov-panel annual-trend"><div className="gov-panel-heading"><div><span className="section-kicker">TREN TAHUNAN · {year}</span><h2>Kunjungan per bulan</h2><p>Rekap bulanan pada tahun yang dipilih.</p></div></div><div className="annual-bars">{months.map((month) => <div className="annual-month" key={month.label}><strong>{month.count}</strong><div className="annual-track"><i style={{ height: `${month.count ? Math.max(8, month.count / maxCount * 100) : 3}%` }}/></div><span>{month.label}</span></div>)}</div></section>;
 }
 
-function GovernmentVisitorApp() {
+function GovernmentVisitorApp({ currentUser, accounts, setAccounts, onLogout }) {
   const [visits, setVisits] = useStoredState(VISITS_KEY, initialVisitData);
   const [blacklist, setBlacklist] = useStoredState(BLACKLIST_KEY, []);
   const [audit, setAudit] = useStoredState(AUDIT_KEY, []);
   const [masters, setMasters] = useStoredState(MASTERS_KEY, seedMasters);
-  const [activeBuilding, setActiveBuilding] = useState(() => readStored("baubau.active-building.v1", BUILDINGS[0]));
+  const [activeBuilding, setActiveBuilding] = useState(() => ["location_admin", "user"].includes(currentUser.role) ? currentUser.building || BUILDINGS[0] : readStored("baubau.active-building.v1", currentUser.building || BUILDINGS[0]));
   const [preferences, setPreferences] = useStoredState(PREFERENCES_KEY, { email: false, whatsapp: false, reminders: true, autoCheckout: false });
   const [feedback] = useStoredState("baubau.feedback.v1", []);
-  const [role, setRole] = useState(() => readStored("baubau.role.v1", "Admin Sistem"));
   const [activePage, setActivePage] = useState("overview");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("Semua status");
@@ -219,13 +218,27 @@ function GovernmentVisitorApp() {
   const [kioskId, setKioskId] = useState("");
   const [masterDraft, setMasterDraft] = useState("");
   const [reportTab, setReportTab] = useState("ringkasan");
-  const canManage = role === "Admin Sistem" || role === "Pimpinan";
+  const [accountDraft, setAccountDraft] = useState({ name: "", email: "", password: "", role: "user", building: BUILDINGS[0] });
+  const [editingAccountId, setEditingAccountId] = useState("");
+  const role = currentUser.role;
+  const roleDefinition = USER_ROLES[role] || USER_ROLES.user;
+  const allowedPages = roleDefinition.pages;
+  const canManageUsers = role === "superadmin";
+  const canChangeBuilding = role === "superadmin" || role === "settings_admin";
   const currentDate = localDate();
 
-  useEffect(() => { try { localStorage.setItem("baubau.role.v1", JSON.stringify(role)); } catch { return; } }, [role]);
-  useEffect(() => { try { localStorage.setItem("baubau.active-building.v1", JSON.stringify(activeBuilding)); } catch { return; } }, [activeBuilding]);
+  useEffect(() => {
+    if (role === "location_admin" || role === "user") setActiveBuilding(currentUser.building || BUILDINGS[0]);
+    else {
+      try { localStorage.setItem("baubau.active-building.v1", JSON.stringify(activeBuilding)); } catch { return; }
+    }
+  }, [activeBuilding, currentUser.building, role]);
 
-  const buildingVisits = useMemo(() => visits.filter((visit) => (visit.building || BUILDINGS[0]) === activeBuilding), [visits, activeBuilding]);
+  const buildingVisits = useMemo(() => visits.filter((visit) => {
+    const matchesBuilding = (visit.building || BUILDINGS[0]) === activeBuilding;
+    const matchesOwner = role !== "user" || visit.createdBy === currentUser.email;
+    return matchesBuilding && matchesOwner;
+  }), [visits, activeBuilding, currentUser.email, role]);
   const todayVisits = useMemo(() => buildingVisits.filter((visit) => visit.date === currentDate && !["Cancelled", "Rejected"].includes(visit.status)), [buildingVisits, currentDate]);
   const onSiteVisits = useMemo(() => buildingVisits.filter((visit) => ["Waiting", "Checked-in", "In Meeting"].includes(visit.status)), [buildingVisits]);
   const pendingApprovals = useMemo(() => buildingVisits.filter((visit) => visit.approvalStatus === "Pending" && visit.status !== "Cancelled"), [buildingVisits]);
@@ -256,7 +269,7 @@ function GovernmentVisitorApp() {
   }
 
   function recordAudit(action, detail) {
-    setAudit((current) => [{ id: `AUD-${Date.now()}`, time: new Date().toISOString(), actor: role, action, detail }, ...current].slice(0, 150));
+    setAudit((current) => [{ id: `AUD-${Date.now()}`, time: new Date().toISOString(), actor: currentUser.name, action, detail }, ...current].slice(0, 150));
   }
 
   function openForm(kind, visit = null) {
@@ -280,7 +293,7 @@ function GovernmentVisitorApp() {
       notify("Jadwal diperbarui dan menunggu persetujuan ulang");
     } else {
       const walkIn = modal === "walk-in";
-      const visit = { ...draft, id: `BT-${Date.now().toString(36).toUpperCase()}`, name: draft.name.trim(), status: walkIn ? "Waiting" : "Scheduled", approvalStatus: walkIn ? "Approved" : "Pending", visitType: walkIn ? "walk-in" : "appointment", idVerified: false, createdAt: new Date().toISOString() };
+      const visit = { ...draft, id: `BT-${Date.now().toString(36).toUpperCase()}`, name: draft.name.trim(), createdBy: currentUser.email, status: walkIn ? "Waiting" : "Scheduled", approvalStatus: walkIn ? "Approved" : "Pending", visitType: walkIn ? "walk-in" : "appointment", idVerified: false, createdAt: new Date().toISOString() };
       setVisits((current) => [visit, ...current]);
       recordAudit(walkIn ? "Tamu walk-in didaftarkan" : "Appointment dibuat", `${visit.name} · ${visit.opd}`);
       notify(walkIn ? "Tamu walk-in masuk antrean verifikasi" : "Appointment tercatat dan dikirim untuk persetujuan");
@@ -410,20 +423,80 @@ function GovernmentVisitorApp() {
     recordAudit("Master data dihapus", value);
   }
 
-  function changeRole(value) {
-    setRole(value);
-    setActivePage("overview");
-    recordAudit("Mode role demo diubah", value);
+  function resetAccountForm() {
+    setAccountDraft({ name: "", email: "", password: "", role: "user", building: masters.buildings[0] || BUILDINGS[0] });
+    setEditingAccountId("");
   }
 
-  const activeItem = navGroups.flatMap((group) => group.items).find((item) => item.id === activePage) || navGroups[0].items[0];
-  const visibleNav = navGroups.map((group) => ({ ...group, items: group.items.filter((item) => canManage || !["masters", "users", "integrations"].includes(item.id)) })).filter((group) => group.items.length);
+  function saveAccount(event) {
+    event.preventDefault();
+    const name = accountDraft.name.trim();
+    const email = accountDraft.email.trim().toLowerCase();
+    const existing = accounts.find((account) => account.id === editingAccountId);
+    if (!name || !email || (!existing && !accountDraft.password)) return;
+    if (accounts.some((account) => account.email.toLowerCase() === email && account.id !== editingAccountId)) {
+      notify("Email sudah digunakan akun lain");
+      return;
+    }
+    const updated = {
+      id: existing?.id || `USR-${Date.now().toString(36).toUpperCase()}`,
+      name,
+      email,
+      password: accountDraft.password || existing?.password,
+      role: accountDraft.role,
+      building: accountDraft.building || masters.buildings[0] || BUILDINGS[0],
+      active: existing?.active !== false,
+    };
+    setAccounts((current) => existing ? current.map((account) => account.id === existing.id ? updated : account) : [...current, updated]);
+    recordAudit(existing ? "Akun pengguna diperbarui" : "Akun pengguna dibuat", `${name} · ${roleDefinitionLabel(updated.role)}`);
+    notify(existing ? "Perubahan akun disimpan" : "Akun pengguna dibuat");
+    resetAccountForm();
+  }
+
+  function editAccount(account) {
+    setAccountDraft({ name: account.name, email: account.email, password: "", role: account.role, building: account.building || masters.buildings[0] || BUILDINGS[0] });
+    setEditingAccountId(account.id);
+  }
+
+  function toggleAccountActive(account) {
+    if (account.id === "root-admin") return;
+    setAccounts((current) => current.map((entry) => entry.id === account.id ? { ...entry, active: entry.active === false } : entry));
+    recordAudit(account.active === false ? "Akun pengguna diaktifkan" : "Akun pengguna dinonaktifkan", account.email);
+  }
+
+  function deleteAccount(account) {
+    if (account.id === "root-admin" || !window.confirm(`Hapus akun ${account.email}?`)) return;
+    setAccounts((current) => current.filter((entry) => entry.id !== account.id));
+    recordAudit("Akun pengguna dihapus", account.email);
+    if (editingAccountId === account.id) resetAccountForm();
+    notify("Akun pengguna dihapus");
+  }
+
+  function roleDefinitionLabel(roleId) {
+    return USER_ROLES[roleId]?.label || "User Biasa";
+  }
+
+  const activeItem = navGroups.flatMap((group) => group.items).find((item) => item.id === activePage && allowedPages.includes(item.id)) || navGroups[0].items[0];
+  const visibleNav = navGroups.map((group) => ({ ...group, items: group.items.filter((item) => allowedPages.includes(item.id)) })).filter((group) => group.items.length);
   const currentMonthVisits = buildingVisits.filter((visit) => visit.date?.startsWith(period) && !["Cancelled", "Rejected"].includes(visit.status));
   const opdsByCount = masters.opds.map((opd) => ({ label: opd, count: currentMonthVisits.filter((visit) => visit.opd === opd).length })).sort((a, b) => b.count - a.count);
   const maxOpdCount = Math.max(1, ...opdsByCount.map((item) => item.count));
   const activeDateLabel = new Intl.DateTimeFormat("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
 
   function renderOverview() {
+    if (role === "user") {
+      const ownRequests = buildingVisits.filter((visit) => visit.visitType !== "walk-in").sort((left, right) => `${right.date} ${right.time}`.localeCompare(`${left.date} ${left.time}`));
+      return <>
+        <section className="gov-summary-grid"><SummaryCard label="Permohonan saya" value={ownRequests.length} note="Janji kunjungan tercatat" color="mint" icon="calendar"/><SummaryCard label="Menunggu persetujuan" value={ownRequests.filter((visit) => visit.approvalStatus === "Pending").length} note="Sedang ditinjau host" color="amber" icon="clock"/><SummaryCard label="Disetujui" value={ownRequests.filter((visit) => visit.approvalStatus === "Approved").length} note="Siap untuk kunjungan" color="blue" icon="check"/><SummaryCard label="Lokasi tugas" value="1" note={activeBuilding} color="rose" icon="building"/></section>
+        <section className="gov-panel"><div className="gov-panel-heading"><div><span className="section-kicker">PORTAL KUNJUNGAN</span><h2>Permohonan kunjungan saya</h2><p>Status janji yang dibuat oleh akun {currentUser.email}.</p></div><button className="primary-button" type="button" onClick={() => openForm("appointment")}><Icon name="plus" size={16}/> Buat janji</button></div><div className="my-request-list">{ownRequests.slice(0, 8).map((visit) => <div className="my-request-row" key={visit.id}><span className="request-date"><strong>{formatDate(visit.date, { day: "2-digit", month: "short" })}</strong><small>{visit.time || "—"}</small></span><span className="request-copy"><strong>{visit.name}</strong><small>{visit.opd} · {visit.purpose}</small></span><StatusBadge status={visit.status}/><span className={`approval-state approval-${(visit.approvalStatus || "Pending").toLowerCase()}`}>{APPROVAL_LABELS[visit.approvalStatus] || "Menunggu"}</span></div>)}{ownRequests.length === 0 && <div className="gov-empty"><Icon name="calendar" size={21}/><strong>Belum ada permohonan</strong><span>Janji kunjungan yang Anda buat akan tampil di sini.</span></div>}</div></section>
+      </>;
+    }
+    if (role === "settings_admin") {
+      return <>
+        <section className="gov-summary-grid"><SummaryCard label="Akun aktif" value={accounts.filter((account) => account.active !== false).length} note="Semua role terdaftar" color="mint" icon="users"/><SummaryCard label="Gedung terkelola" value={masters.buildings.length} note="Master lokasi e-TAMU" color="amber" icon="building"/><SummaryCard label="OPD terdaftar" value={masters.opds.length} note="Data referensi" color="blue" icon="grid"/><SummaryCard label="Koneksi aktif" value={Number(preferences.email) + Number(preferences.whatsapp)} note="Integrasi notifikasi demo" color="rose" icon="plug"/></section>
+        <section className="gov-panel role-home-panel"><div className="gov-panel-heading"><div><span className="section-kicker">PENGELOLAAN SISTEM</span><h2>Pengaturan e-TAMU</h2><p>Pilih area konfigurasi yang ingin dikelola.</p></div></div><div className="role-home-actions"><button type="button" onClick={() => setActivePage("masters")}><Icon name="building" size={18}/><span><strong>Master data</strong><small>Gedung, OPD, host, dan ruang</small></span><Icon name="arrow" size={15}/></button><button type="button" onClick={() => setActivePage("integrations")}><Icon name="plug" size={18}/><span><strong>Integrasi sistem</strong><small>Notifikasi dan preferensi</small></span><Icon name="arrow" size={15}/></button><button type="button" onClick={() => setActivePage("reports")}><Icon name="chart" size={18}/><span><strong>Laporan & analitik</strong><small>Ringkasan kunjungan per lokasi</small></span><Icon name="arrow" size={15}/></button></div></section>
+      </>;
+    }
     const awaiting = todayVisits.filter((visit) => ["Scheduled", "Waiting"].includes(visit.status)).slice(0, 4);
     return <>
       <section className="gov-summary-grid"><SummaryCard label="Sedang berada di kantor" value={onSiteVisits.length} note={`${onSiteVisits.filter((visit) => visit.status === "In Meeting").length} sedang bertemu host`} color="mint" icon="door"/><SummaryCard label="Janji hari ini" value={todayVisits.filter((visit) => visit.visitType !== "walk-in").length} note={`${pendingApprovals.length} menunggu persetujuan`} color="amber" icon="calendar"/><SummaryCard label="Menunggu check-in" value={todayVisits.filter((visit) => visit.status === "Waiting").length} note="Termasuk registrasi walk-in" color="blue" icon="clock"/><SummaryCard label="Kunjungan selesai" value={todayVisits.filter((visit) => visit.status === "Checked-out").length} note="Check-out hari ini" color="rose" icon="check"/></section>
@@ -480,8 +553,25 @@ function GovernmentVisitorApp() {
   }
 
   function renderUsers() {
-    const users = [{ name: "Aisyah Rahman", role: "Petugas Front Office", opd: "Bagian Umum Setda", status: "Aktif" }, { name: "Rizal Hidayat", role: "Pegawai / Host", opd: "DPMPTSP", status: "Aktif" }, { name: "Nurul Safitri", role: "Pimpinan", opd: "BKPSDM", status: "Aktif" }, { name: "Admin Pemkot", role: "Admin Sistem", opd: "Bagian Umum Setda", status: "Aktif" }];
-    return <div className="admin-layout"><section className="gov-panel"><div className="gov-panel-heading"><div><span className="section-kicker">AKSES PENGGUNA</span><h2>Admin & role akses</h2><p>Role switcher di atas hanya simulasi permission, belum menggunakan autentikasi.</p></div></div><div className="role-preview"><label>Simulasikan role<select value={role} onChange={(event) => changeRole(event.target.value)}>{roleOptions.map((option) => <option key={option}>{option}</option>)}</select></label><p>Menu master, admin, dan integrasi dibatasi untuk Admin Sistem / Pimpinan pada prototype ini.</p></div><div className="gov-table-wrap"><table className="gov-table"><thead><tr><th>PENGGUNA</th><th>ROLE</th><th>OPD</th><th>STATUS</th></tr></thead><tbody>{users.map((user) => <tr key={user.name}><td>{user.name}</td><td>{user.role}</td><td>{user.opd}</td><td><span className="approval-state approval-approved">{user.status}</span></td></tr>)}</tbody></table></div></section><section className="gov-panel audit-panel"><div className="gov-panel-heading"><div><span className="section-kicker">AUDIT TRAIL</span><h2>Aktivitas administrator</h2><p>{audit.length} aksi terakhir tersimpan lokal.</p></div></div><div className="audit-list">{audit.slice(0, 12).map((entry) => <div className="audit-row" key={entry.id}><span className="audit-marker"/><span><strong>{entry.action}</strong><small>{entry.actor} · {entry.detail}</small></span><time>{new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date(entry.time))}</time></div>)}{audit.length === 0 && <p className="empty-inline">Aksi administratif akan tercatat di sini.</p>}</div></section></div>;
+    return <div className="admin-layout user-admin-layout">
+      <section className="gov-panel account-panel">
+        <div className="gov-panel-heading"><div><span className="section-kicker">AKSES PENGGUNA</span><h2>Manajemen akun</h2><p>{accounts.length} akun terdaftar · perubahan disimpan pada browser ini.</p></div></div>
+        <div className="access-level-list">{Object.entries(USER_ROLES).map(([roleId, definition]) => <div className="access-level-row" key={roleId}><strong>{definition.label}</strong><span>{roleId === "superadmin" ? "Seluruh fitur dan akun" : roleId === "settings_admin" ? "Ringkasan, laporan, master data, dan integrasi" : roleId === "location_admin" ? "Operasional dan laporan pada satu gedung" : "Ajukan serta pantau janji kunjungan sendiri"}</span></div>)}</div>
+        <form className="account-form" onSubmit={saveAccount}>
+          <div className="account-form-heading"><strong>{editingAccountId ? "Ubah akun" : "Tambah akun"}</strong>{editingAccountId && <button type="button" onClick={resetAccountForm}>Batal</button>}</div>
+          <div className="account-form-grid">
+            <label>Nama pengguna<input required maxLength={90} value={accountDraft.name} onChange={(event) => setAccountDraft({ ...accountDraft, name: event.target.value })} placeholder="Nama lengkap" /></label>
+            <label>Email<input required type="email" autoComplete="off" value={accountDraft.email} onChange={(event) => setAccountDraft({ ...accountDraft, email: event.target.value })} placeholder="nama@instansi.go.id" /></label>
+            <label>Kata sandi<input type="password" autoComplete="new-password" required={!editingAccountId} value={accountDraft.password} onChange={(event) => setAccountDraft({ ...accountDraft, password: event.target.value })} placeholder={editingAccountId ? "Kosongkan untuk tetap memakai sandi lama" : "Buat kata sandi"} /></label>
+            <label>Level akses<select value={accountDraft.role} onChange={(event) => setAccountDraft({ ...accountDraft, role: event.target.value })}>{Object.entries(USER_ROLES).filter(([roleId]) => roleId !== "superadmin").map(([roleId, definition]) => <option key={roleId} value={roleId}>{definition.label}</option>)}</select></label>
+            {accountDraft.role !== "settings_admin" && <label>Gedung / lokasi<select value={accountDraft.building} onChange={(event) => setAccountDraft({ ...accountDraft, building: event.target.value })}>{masters.buildings.map((building) => <option key={building}>{building}</option>)}</select></label>}
+          </div>
+          <button className="primary-button" type="submit"><Icon name="plus" size={15}/>{editingAccountId ? "Simpan perubahan" : "Buat akun"}</button>
+        </form>
+        <div className="gov-table-wrap"><table className="gov-table account-table"><thead><tr><th>PENGGUNA</th><th>LEVEL AKSES</th><th>LOKASI</th><th>STATUS</th><th>AKSI</th></tr></thead><tbody>{accounts.map((account) => <tr key={account.id}><td><span className="account-person"><strong>{account.name}</strong><small>{account.email}</small></span></td><td><span className={`role-badge role-${account.role}`}>{roleDefinitionLabel(account.role)}</span></td><td>{account.role === "settings_admin" || account.role === "superadmin" ? "Semua lokasi" : account.building}</td><td><span className={`approval-state ${account.active === false ? "approval-rejected" : "approval-approved"}`}>{account.active === false ? "Nonaktif" : "Aktif"}</span></td><td><div className="account-actions"><button className="mini-action" type="button" disabled={account.id === "root-admin"} onClick={() => editAccount(account)}>Ubah</button><button className="mini-action" type="button" disabled={account.id === "root-admin"} onClick={() => toggleAccountActive(account)}>{account.active === false ? "Aktifkan" : "Nonaktifkan"}</button><button className="mini-icon reject" type="button" aria-label={`Hapus akun ${account.email}`} title="Hapus akun" disabled={account.id === "root-admin"} onClick={() => deleteAccount(account)}>×</button></div></td></tr>)}</tbody></table></div>
+      </section>
+      <section className="gov-panel audit-panel"><div className="gov-panel-heading"><div><span className="section-kicker">AUDIT TRAIL</span><h2>Aktivitas administrator</h2><p>{audit.length} aksi terakhir tersimpan lokal.</p></div></div><div className="audit-list">{audit.slice(0, 12).map((entry) => <div className="audit-row" key={entry.id}><span className="audit-marker"/><span><strong>{entry.action}</strong><small>{entry.actor} · {entry.detail}</small></span><time>{new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date(entry.time))}</time></div>)}{audit.length === 0 && <p className="empty-inline">Aksi administratif akan tercatat di sini.</p>}</div></section>
+    </div>;
   }
 
   function renderIntegrations() {
@@ -490,6 +580,7 @@ function GovernmentVisitorApp() {
   }
 
   function renderPage() {
+    if (!allowedPages.includes(activePage)) return renderOverview();
     if (activePage === "overview") return renderOverview();
     if (activePage === "visitors") return renderVisitorDatabase();
     if (activePage === "history") return renderHistory();
@@ -500,19 +591,18 @@ function GovernmentVisitorApp() {
     if (activePage === "reports") return renderReports();
     if (activePage === "feedback") return renderFeedback();
     if (activePage === "masters") return renderMasters();
-    if (activePage === "users") return renderUsers();
+    if (activePage === "users" && canManageUsers) return renderUsers();
     return renderIntegrations();
   }
 
   const activePersonHistory = selectedVisit ? buildingVisits.filter((visit) => personKey(visit) === personKey(selectedVisit)) : [];
 
   return <div className="baubau-app">
-    <aside className="gov-sidebar"><a className="gov-brand" href="#beranda" onClick={() => setActivePage("overview")}><span className="gov-brand-emblem"><Icon name="building" size={20}/></span><span><strong>e-TAMU</strong><small>PEMKOT BAUBAU</small></span></a><div className="gov-workspace"><span className="city-seal">B</span><span><strong>Pemerintah Kota Baubau</strong><small>Sistem manajemen kunjungan</small></span></div>{visibleNav.map((group) => <div className="gov-nav-group" key={group.title}><span className="gov-nav-title">{group.title}</span>{group.items.map((item) => <button className={`gov-nav-item ${activePage === item.id ? "active" : ""}`} type="button" key={item.id} onClick={() => { setActivePage(item.id); setSearch(""); }}><Icon name={item.icon} size={16}/><span>{item.label}</span>{item.id === "approvals" && pendingApprovals.length > 0 && <b>{pendingApprovals.length}</b>}</button>)}</div>)}<div className="gov-sidebar-footer"><span className="connection-mark"/><span>Mode prototype · data lokal</span><small>v0.2.0</small></div></aside>
+    <aside className="gov-sidebar"><a className="gov-brand" href="#beranda" onClick={() => setActivePage("overview")}><span className="gov-brand-emblem"><Icon name="building" size={20}/></span><span><strong>e-TAMU</strong><small>PEMKOT BAUBAU</small></span></a><div className="gov-workspace"><span className="city-seal">B</span><span><strong>Pemerintah Kota Baubau</strong><small>Sistem manajemen kunjungan</small></span></div>{visibleNav.map((group) => <div className="gov-nav-group" key={group.title}><span className="gov-nav-title">{group.title}</span>{group.items.map((item) => <button className={`gov-nav-item ${activePage === item.id ? "active" : ""}`} type="button" key={item.id} aria-label={item.label} title={item.label} onClick={() => { setActivePage(item.id); setSearch(""); }}><Icon name={item.icon} size={16}/><span>{item.label}</span>{item.id === "approvals" && pendingApprovals.length > 0 && <b>{pendingApprovals.length}</b>}</button>)}</div>)}<div className="gov-sidebar-footer"><span className="connection-mark"/><span>Mode prototype · data lokal</span><small>v0.2.0</small></div></aside>
     <main className="gov-main"><header className="gov-topbar"><div className="gov-breadcrumb"><span>Baubau</span><span>/</span><strong>{activeItem.label}</strong></div><div className="gov-top-actions"><span className="today-date">{activeDateLabel}</span>
-<label className="building-switch"><span>Gedung</span><select aria-label="Gedung aktif" value={activeBuilding} onChange={(event) => setActiveBuilding(event.target.value)}>{masters.buildings.map((building) => <option key={building}>{building}</option>)}</select></label>
-<label className="role-switch"><span>Role demo</span><select aria-label="Role demo" value={role} onChange={(event) => changeRole(event.target.value)}>{roleOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-<button className="gov-user-avatar" type="button" title={role}>{role === "Admin Sistem" ? "AS" : role === "Pimpinan" ? "PI" : role === "Pegawai / Host" ? "PH" : "FO"}</button></div></header>
-      <div className="gov-page-content"><section className="gov-page-heading"><div><span className="gov-eyebrow">PEMERINTAH KOTA BAUBAU · {activeDateLabel.toUpperCase()}</span><h1>{activePage === "overview" ? "Pusat kendali kunjungan" : activeItem.label}</h1><p>{activePage === "overview" ? "Pantau kedatangan tamu, jadwal OPD, dan kondisi gedung hari ini." : `Kelola ${activeItem.label.toLowerCase()} lintas OPD dalam satu workspace.`}</p></div><div className="gov-heading-actions"><button className="outline-action" type="button" onClick={() => setToolsOpen(true)}><Icon name="qr" size={15}/> QR & tautan</button>{["overview", "visitors", "frontdesk"].includes(activePage) && <button className="primary-button" type="button" onClick={() => openForm(activePage === "frontdesk" ? "walk-in" : "appointment")}><Icon name="plus" size={16}/>{activePage === "frontdesk" ? "Daftarkan walk-in" : "Buat kunjungan"}</button>}</div></section>
+  {canChangeBuilding ? <label className="building-switch"><span>Gedung</span><select aria-label="Gedung aktif" value={activeBuilding} onChange={(event) => setActiveBuilding(event.target.value)}>{masters.buildings.map((building) => <option key={building}>{building}</option>)}</select></label> : <span className="building-current"><small>Lokasi akses</small><strong>{activeBuilding}</strong></span>}
+  <span className={`role-chip role-${role}`}>{roleDefinition.label}</span><button className="gov-user-avatar" type="button" title={currentUser.email}>{currentUser.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</button><button className="logout-button" type="button" onClick={onLogout}>Keluar</button></div></header>
+      <div className="gov-page-content"><section className="gov-page-heading"><div><span className="gov-eyebrow">PEMERINTAH KOTA BAUBAU · {activeDateLabel.toUpperCase()}</span><h1>{activePage === "overview" ? role === "user" ? `Selamat datang, ${currentUser.name}` : role === "settings_admin" ? "Pengaturan e-TAMU" : role === "location_admin" ? "Operasional lokasi" : "Pusat kendali kunjungan" : activeItem.label}</h1><p>{activePage === "overview" ? role === "user" ? "Ajukan janji kunjungan dan pantau status permohonan Anda." : role === "settings_admin" ? "Kelola konfigurasi, data referensi, dan laporan seluruh lokasi." : role === "location_admin" ? `Pantau dan kelola kunjungan di ${activeBuilding}.` : "Pantau kedatangan tamu, jadwal OPD, dan kondisi gedung hari ini." : `Kelola ${activeItem.label.toLowerCase()}${role === "user" ? " Anda" : ` untuk ${activeBuilding}`}.`}</p></div><div className="gov-heading-actions">{["superadmin", "location_admin"].includes(role) && <button className="outline-action" type="button" onClick={() => setToolsOpen(true)}><Icon name="qr" size={15}/> QR & tautan</button>}{["superadmin", "location_admin"].includes(role) && ["overview", "visitors", "frontdesk"].includes(activePage) && <button className="primary-button" type="button" onClick={() => openForm(activePage === "frontdesk" ? "walk-in" : "appointment")}><Icon name="plus" size={16}/>{activePage === "frontdesk" ? "Daftarkan walk-in" : "Buat kunjungan"}</button>}</div></section>
       {renderPage()}
       {activePage === "reports" && <YearTrend visits={buildingVisits} year={period.slice(0, 4)}/>} 
       {activePage === "integrations" && renderBackupPanel()}
@@ -560,10 +650,27 @@ function PublicFeedbackPage({ visitId }) {
 }
 
 export default function BaubauVisitorApp() {
+  const [accounts, setAccounts] = useState(readUserAccounts);
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const email = sessionStorage.getItem(SESSION_KEY);
+      return email ? readUserAccounts().find((account) => account.email.toLowerCase() === email.toLowerCase() && account.active !== false) || null : null;
+    } catch { return null; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts)); } catch { return; }
+  }, [accounts]);
   const params = new URLSearchParams(window.location.search);
   const flow = params.get("flow");
   if (flow === "walk-in" || flow === "event") return <PublicVisitForm mode={flow} eventDetails={{ name: params.get("event") || "", date: params.get("date") || "", location: params.get("location") || "", opd: params.get("opd") || "Bagian Umum Setda", host: params.get("host") || "", room: params.get("room") || "" }}/>;
   if (flow === "checkout") return <PublicActionPage visitId={params.get("id") || ""}/>;
   if (flow === "feedback") return <PublicFeedbackPage visitId={params.get("id") || ""}/>;
-  return <GovernmentVisitorApp/>;
+  if (!currentUser) return <SuperadminLogin accounts={accounts} onLogin={(account) => {
+    try { sessionStorage.setItem(SESSION_KEY, account.email); } catch { /* Keep this prototype usable when browser storage is unavailable. */ }
+    setCurrentUser(account);
+  }}/>;
+  return <GovernmentVisitorApp currentUser={currentUser} accounts={accounts} setAccounts={setAccounts} onLogout={() => {
+    try { sessionStorage.removeItem(SESSION_KEY); } catch { /* The in-memory session still ends. */ }
+    setCurrentUser(null);
+  }}/>;
 }
